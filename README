@@ -1,0 +1,20 @@
+Eth MPI apps
+------------
+
+* To build the RPM and SRPM:
+
+  1. mkdir -p $HOME/rpmbuild/{SOURCES,RPMS,SRPMS}
+  2. tar czf $HOME/rpmbuild/SOURCES/eth-mpi-apps.tgz --exclude-vcs .
+  3. rpmbuild -ba ./OpenIb_Host/mpi-apps.spec
+
+  This will build the eth-mpi-apps RPMs in $HOME/rpmbuild/RPMS/(architecture)/
+
+  This will also create a eth-mpi-apps-debuginfo RPM, which by default contains basic symbol
+  information - see below on how to build with full debugging information.
+
+
+* How to include debugging symbols:
+
+  export BUILD_CONFIG=debug
+
+  prior to either of the aforementioned build procedures.
