@@ -55,8 +55,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 		if (cudaerr != cudaSuccess) {				\
 			fprintf(stderr,					\
 				"CUDA failure: %s() (at %s:%d)"		\
-				"returned %d\n",			\
-				#func, __FILE__, __LINE__, cudaerr);	\
+				"returned %d: %s\n",			\
+				#func, __FILE__, __LINE__, cudaerr,	\
+				cudaGetErrorString(cudaerr));		\
 			sleep(2);					\
 			exit(cudaerr);					\
 		}							\
@@ -455,7 +456,8 @@ static int print_data_errors (FILE *out,
   if (!local->params.quiet) {
     fprintf(out, "%s rank %d : found following data errors\n",
             myhostname, (int) local->comm_rank);
-    fprintf(out, "%12s\t%12s\t%7s\t%7s",
+    fprintf(out, "%s rank %d : %12s\t%12s\t%7s\t%7s",
+            myhostname, (int) local->comm_rank,
             "Address", "Offset", "Expect", "Actual");
     if (initial) {
       fprintf(out, "\t%8s", "Initial");
@@ -467,7 +469,8 @@ static int print_data_errors (FILE *out,
       if (src_data[i+j] != data[i+j]) {
         if (!local->params.quiet) {
 	  if (errors < local->params.max_errors) {
-            fprintf(out, "%12p\t%12d\t   0x%02x\t   0x%02x",
+            fprintf(out, "%s rank %d : %12p\t%12d\t   0x%02x\t   0x%02x",
+                    myhostname, (int) local->comm_rank,
 		    &data[i+j], i + j, src_data[i+j], data[i+j]);
 	    if (initial) {
 	      fprintf(out, "\t    0x%02x", dst_data[i+j]);
@@ -614,7 +617,7 @@ static int validate_small_msg (FILE *out, local_state_t *local,
     chk = 0;
     data_chk = msg->data_multi_byte_chk;
     chk = calculate_xor_16(data_len, data, initial_chk(local));
-    errors += validate_uint32(out, local, "data_chk", chk, data_chk);
+    errors += validate_uint32(out, local, "data_chk", data_chk, chk);
     break;
   }
   return errors;
@@ -632,12 +635,12 @@ static int validate_msg (FILE *out, local_state_t *local, msg_state_t *msg,
     return validate_small_msg(out, local, hdr, len, data);
   }
 
-  errors += validate_uint32(out, local, "src", src, hdr->src);
-  errors += validate_uint32(out, local, "dst", local->comm_rank, hdr->dst);
-  errors += validate_uint32(out, local, "tag", tag, hdr->tag);
-  errors += validate_uint32(out, local, "len", len, hdr->len);
+  errors += validate_uint32(out, local, "src", hdr->src, src);
+  errors += validate_uint32(out, local, "dst", hdr->dst, local->comm_rank);
+  errors += validate_uint32(out, local, "tag", hdr->tag, tag);
+  errors += validate_uint32(out, local, "len", hdr->len, len);
   errors += validate_uint32(out, local, "seq",
-                            local->peers[src].recv_seq, hdr->seq);
+                            hdr->seq, local->peers[src].recv_seq);
   local->peers[src].recv_seq++;
 
   hdr_chk = hdr->hdr_chk;
@@ -645,7 +648,7 @@ static int validate_msg (FILE *out, local_state_t *local, msg_state_t *msg,
   chk = calculate_chk(local, sizeof(msg_hdr_t), (uint8_t *) hdr,
                      initial_chk(local));
   hdr->hdr_chk = hdr_chk;
-  errors += validate_uint32(out, local, "hdr_chk", chk, hdr_chk);
+  errors += validate_uint32(out, local, "hdr_chk", hdr_chk, chk);
   hdr_ok = (chk == hdr_chk);
 
   chk = 0;
@@ -653,7 +656,7 @@ static int validate_msg (FILE *out, local_state_t *local, msg_state_t *msg,
   if (local->params.data_check) {
     chk = calculate_chk(local, data_len, data, initial_chk(local));
   }
-  errors += validate_uint32(out, local, "data_chk", chk, data_chk);
+  errors += validate_uint32(out, local, "data_chk", data_chk, chk);
   if (errors) {
     print_hdr(out, "received", local, hdr);
     if (chk != data_chk) {
