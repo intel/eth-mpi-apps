@@ -279,6 +279,8 @@ typedef struct params
   int max_errors;
   uint32_t wait_on_start;
   uint32_t wait_on_exit;
+  int use_gpu_send;
+  int use_gpu_recv;
 } params_t;
 
 typedef struct local_state
@@ -875,24 +877,27 @@ static int send_one_msg (local_state_t *local, msg_array_t *send_array,
     tag = choose_tag(local);
     generate_msg(local, hdr, dst, tag, size, data);
 #ifdef MPI_STRESS_CUDA
-    CUDA_CALL(cudaMemcpy, gpubuf, buf, sizeof(msg_hdr_t), cudaMemcpyHostToDevice);
+    if (local->params.use_gpu_send)
+      CUDA_CALL(cudaMemcpy, gpubuf, buf, sizeof(msg_hdr_t), cudaMemcpyHostToDevice);
 #endif
   } else {
     tag = 1;
     data = (uint8_t *) (((small_msg_hdr_t*) send_array->msgs[index].buf) + 1);
     generate_small_msg(local, (small_msg_t *) hdr, size, data, imm_data);
 #ifdef MPI_STRESS_CUDA
-    CUDA_CALL(cudaMemcpy, gpubuf, buf, size, cudaMemcpyHostToDevice);
+    if (local->params.use_gpu_send)
+      CUDA_CALL(cudaMemcpy, gpubuf, buf, size, cudaMemcpyHostToDevice);
 #endif
   }
 
 #ifdef MPI_STRESS_CUDA
-  result = local->params.mpi_send_fn(gpuhdr, size, MPI_BYTE, dst, tag,
-				     MPI_COMM_WORLD, send_req);
-#else
+  if (local->params.use_gpu_send)
+    result = local->params.mpi_send_fn(gpuhdr, size, MPI_BYTE, dst, tag,
+				       MPI_COMM_WORLD, send_req);
+  else
+#endif
   result = local->params.mpi_send_fn(hdr, size, MPI_BYTE, dst, tag,
 				     MPI_COMM_WORLD, send_req);
-#endif
   errors += validate_result(local, local->params.mpi_send_fn_name, result);
   if (local->params.verbose >= 2) {
     print_hdr(stdout, "send", local, hdr);
@@ -962,7 +967,8 @@ static int poll_for_msgs (local_state_t *local, msg_array_t *recv_array,
             errors += validate_uint32(out, local, "length", count, size);
 	  }
 #ifdef MPI_STRESS_CUDA
-	  CUDA_CALL(cudaMemcpy, buf, gpubuf, irecv_size, cudaMemcpyDeviceToHost);
+	  if (local->params.use_gpu_recv)
+	    CUDA_CALL(cudaMemcpy, buf, gpubuf, irecv_size, cudaMemcpyDeviceToHost);
 #endif
           errors += validate_msg(stdout, local, msg, hdr, src, tag,
 				 count, data);
@@ -981,12 +987,13 @@ static int poll_for_msgs (local_state_t *local, msg_array_t *recv_array,
     }
     if (*recv_req == MPI_REQUEST_NULL) {
 #ifdef MPI_STRESS_CUDA
-      result = MPI_Irecv(gpuhdr, irecv_size, MPI_BYTE, MPI_ANY_SOURCE,
-                         MPI_ANY_TAG, MPI_COMM_WORLD, recv_req);
-#else
+      if (local->params.use_gpu_recv)
+        result = MPI_Irecv(gpuhdr, irecv_size, MPI_BYTE, MPI_ANY_SOURCE,
+                           MPI_ANY_TAG, MPI_COMM_WORLD, recv_req);
+      else
+#endif
       result = MPI_Irecv(hdr, irecv_size, MPI_BYTE, MPI_ANY_SOURCE,
                          MPI_ANY_TAG, MPI_COMM_WORLD, recv_req);
-#endif
       errors += validate_result(local, "MPI_Irecv", result);
       recv_array->index++;
       if (recv_array->index == recv_array->count) {
@@ -1356,6 +1363,7 @@ static int run_one_misaligned_size (local_state_t *local, uint32_t msgs, uint32_
 	recv_array.msgs[i].poison_seed = 0;
 	recv_array.index = 0;
       }
+      /* GPUs do not allow misalligned buffers */
 
       preinit_msg_array(local, &send_array, 1);
       preinit_msg_array(local, &recv_array, 0);
@@ -1804,7 +1812,7 @@ static params_t get_params (int argc, char **argv,
   int option;
   int result = EXIT_SUCCESS;
   int run = 1;
-  const char *optlist = "-a:Ab:cdD:eE:g:G:hiI:l:L:m:M:n:OpPqrRsSt:uvw:W:xyzZ";
+  const char *optlist = "a:Ab:cdD:eE:g:G:hiI:l:L:m:M:n:OpPqrRsSt:uvw:W:xyzZ";
 
   /* set default parameters */
   params.verbose = 0;					/* -v */
@@ -1842,6 +1850,13 @@ static params_t get_params (int argc, char **argv,
   params.wait_on_start = 0;				/* -W %d */
   params.wait_on_exit = 0;				/* -W %d */
   params.use_small_messages = 0;			/* -y */
+#ifdef MPI_STRESS_CUDA
+  params.use_gpu_send = 1;				/* D D */
+  params.use_gpu_recv = 1;
+#else
+  params.use_gpu_send = 0;				/* H H */
+  params.use_gpu_recv = 0;
+#endif
 
   /* get parameters from command line options */
   while ((option = getopt(argc, argv, optlist)) != -1) {
@@ -2019,6 +2034,50 @@ static params_t get_params (int argc, char **argv,
       }
     }
   }
+  if (optind < argc) {
+    if (0 == strcmp(argv[optind], "H"))
+      params.use_gpu_send = 0;
+#ifdef MPI_STRESS_CUDA
+    else if (0 == strcmp(argv[optind], "D"))
+      params.use_gpu_send = 1;
+#endif
+    else {
+      if (comm_rank == 0) {
+#ifdef MPI_STRESS_CUDA
+        fprintf(stderr, "Error: Invalid send device '%s', must be 'H' or 'D\n", argv[optind]);
+#else
+        fprintf(stderr, "Error: Invalid send device '%s', must be 'H'\n", argv[optind]);
+#endif
+      }
+      run = 0;
+    }
+    optind++;
+  }
+  if (optind < argc) {
+    if (0 == strcmp(argv[optind], "H"))
+      params.use_gpu_recv = 0;
+#ifdef MPI_STRESS_CUDA
+    else if (0 == strcmp(argv[optind], "D"))
+      params.use_gpu_recv = 1;
+#endif
+    else {
+      if (comm_rank == 0) {
+#ifdef MPI_STRESS_CUDA
+        fprintf(stderr, "Error: Invalid recv device '%s', must be 'H' or 'D\n", argv[optind]);
+#else
+        fprintf(stderr, "Error: Invalid recv device '%s', must be 'H'\n", argv[optind]);
+#endif
+      }
+      run = 0;
+    }
+    optind++;
+  }
+  if (optind < argc) {
+    if (comm_rank == 0) {
+      fprintf(stderr, "Error: Unexpected extra arguments\n");
+    }
+    run = 0;
+  }
   if (params.grid_ndims < 0) {
     if (comm_rank == 0) {
       fprintf(stderr, "Error: grid dimensions must not be less than 0\n");
@@ -2177,6 +2236,9 @@ int main (int argc, char **argv)
   gethostname(myhostname, MPI_MAX_PROCESSOR_NAME);
 
   params = get_params(argc, argv, comm_rank, comm_size);
+#ifdef MPI_STRESS_CUDA
+  printf("Rank %d: Using Cuda Device %d (%d total)\n", comm_rank, i, devCnt);
+#endif
 
   if (params.wait_on_start) {
     if (comm_rank == 0) {
@@ -2192,6 +2254,11 @@ int main (int argc, char **argv)
     char s[26];
     ctime_r(&t, s);
     printf("Start mpi_stress at %s", s);
+#ifdef MPI_STRESS_CUDA
+    printf("Send Buffer on %s and Receive Buffer on %s\n",
+	   params.use_gpu_send ? "DEVICE (D)" : "HOST (H)",
+	   params.use_gpu_recv ? "DEVICE (D)" : "HOST (H)");
+#endif
   }
 
   r = 0;
