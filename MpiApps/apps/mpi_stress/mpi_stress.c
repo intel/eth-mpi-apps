@@ -44,6 +44,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <cuda.h>
 #include <cuda_runtime.h>
 #endif
+#ifdef MPI_STRESS_ONEAPI
+#include <level_zero/ze_api.h>
+#endif // MPI_STRESS_ONEAPI
 
 #define MIN(a,b) (((a) < (b)) ? (a) : (b))
 #define MAX(a,b) (((a) > (b)) ? (a) : (b))
@@ -64,6 +67,90 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 	} while (0)
 #define MAX_DEVICES          8
 #endif
+
+#ifdef MPI_STRESS_ONEAPI
+static ze_context_handle_t ze_context = NULL;
+static ze_driver_handle_t ze_driver = NULL;
+static ze_device_handle_t ze_device = NULL;
+static ze_command_queue_handle_t ze_cq = NULL;
+static ze_command_list_handle_t ze_cl = NULL;
+
+#define MPI_STRESS_ONEAPI_ZE_CALL(func, args...) do { \
+  ze_result_t result; \
+  result = func(args);	\
+  if(result != ZE_RESULT_SUCCESS) { \
+    fprintf(stderr, "OneAPI Level Zero failure: %s() (at %s:%d) " \
+      "returned %d: %s\n", \
+      #func, __FILE__, __LINE__, result, psmi_oneapi_ze_result_to_string(result)); \
+    sleep(2);	\
+    exit(result); \
+  } \
+} while (0)
+
+static const char* psmi_oneapi_ze_result_to_string(const ze_result_t result) {
+#define ZE_RESULT_CASE(RES) case ZE_RESULT_##RES: return #RES
+
+  switch (result) {
+  ZE_RESULT_CASE(SUCCESS);
+  ZE_RESULT_CASE(NOT_READY);
+  ZE_RESULT_CASE(ERROR_UNINITIALIZED);
+  ZE_RESULT_CASE(ERROR_DEVICE_LOST);
+  ZE_RESULT_CASE(ERROR_INVALID_ARGUMENT);
+  ZE_RESULT_CASE(ERROR_OUT_OF_HOST_MEMORY);
+  ZE_RESULT_CASE(ERROR_OUT_OF_DEVICE_MEMORY);
+  ZE_RESULT_CASE(ERROR_MODULE_BUILD_FAILURE);
+  ZE_RESULT_CASE(ERROR_INSUFFICIENT_PERMISSIONS);
+  ZE_RESULT_CASE(ERROR_NOT_AVAILABLE);
+  ZE_RESULT_CASE(ERROR_UNSUPPORTED_VERSION);
+  ZE_RESULT_CASE(ERROR_UNSUPPORTED_FEATURE);
+  ZE_RESULT_CASE(ERROR_INVALID_NULL_HANDLE);
+  ZE_RESULT_CASE(ERROR_HANDLE_OBJECT_IN_USE);
+  ZE_RESULT_CASE(ERROR_INVALID_NULL_POINTER);
+  ZE_RESULT_CASE(ERROR_INVALID_SIZE);
+  ZE_RESULT_CASE(ERROR_UNSUPPORTED_SIZE);
+  ZE_RESULT_CASE(ERROR_UNSUPPORTED_ALIGNMENT);
+  ZE_RESULT_CASE(ERROR_INVALID_SYNCHRONIZATION_OBJECT);
+  ZE_RESULT_CASE(ERROR_INVALID_ENUMERATION);
+  ZE_RESULT_CASE(ERROR_UNSUPPORTED_ENUMERATION);
+  ZE_RESULT_CASE(ERROR_UNSUPPORTED_IMAGE_FORMAT);
+  ZE_RESULT_CASE(ERROR_INVALID_NATIVE_BINARY);
+  ZE_RESULT_CASE(ERROR_INVALID_GLOBAL_NAME);
+  ZE_RESULT_CASE(ERROR_INVALID_KERNEL_NAME);
+  ZE_RESULT_CASE(ERROR_INVALID_FUNCTION_NAME);
+  ZE_RESULT_CASE(ERROR_INVALID_GROUP_SIZE_DIMENSION);
+  ZE_RESULT_CASE(ERROR_INVALID_GLOBAL_WIDTH_DIMENSION);
+  ZE_RESULT_CASE(ERROR_INVALID_KERNEL_ARGUMENT_INDEX);
+  ZE_RESULT_CASE(ERROR_INVALID_KERNEL_ARGUMENT_SIZE);
+  ZE_RESULT_CASE(ERROR_INVALID_KERNEL_ATTRIBUTE_VALUE);
+  ZE_RESULT_CASE(ERROR_INVALID_COMMAND_LIST_TYPE);
+  ZE_RESULT_CASE(ERROR_OVERLAPPING_REGIONS);
+  ZE_RESULT_CASE(ERROR_UNKNOWN);
+  default:
+    return "Unknown error";
+  }
+
+#undef ZE_RESULT_CASE
+}
+
+static void oneapi_ze_malloc(void **pptr, size_t size)
+{
+  size_t alignment = 64;
+  ze_device_mem_alloc_desc_t dev_desc = {
+    .stype = ZE_STRUCTURE_TYPE_DEVICE_MEM_ALLOC_DESC,
+    .flags = 0,
+    .ordinal = 0
+  };
+  MPI_STRESS_ONEAPI_ZE_CALL(zeMemAllocDevice, ze_context, &dev_desc, size, alignment, ze_device, pptr);
+}
+
+static void oneapi_ze_memcpy(void *dstptr, const void *srcptr, size_t size) {
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListAppendMemoryCopy, ze_cl, dstptr, srcptr, size, NULL, 0, NULL);
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListClose, ze_cl);
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueExecuteCommandLists, ze_cq, 1, &ze_cl, NULL);
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueSynchronize, ze_cq, UINT32_MAX);
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListReset, ze_cl);
+}
+#endif // MPI_STRESS_ONEAPI
 
 #define DEFAULT_INITIAL_BYTE 0x00
 
@@ -220,7 +307,7 @@ typedef struct msg_hdr
 typedef struct msg_state
 {
   uint8_t *buf;
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
   uint8_t *gpubuf;
 #endif
 
@@ -678,7 +765,7 @@ static void alloc_msg_array (msg_array_t *array, uint32_t count,
 {
   uint32_t i;
 
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
   unsigned f = 1;
 #endif
 
@@ -692,6 +779,9 @@ static void alloc_msg_array (msg_array_t *array, uint32_t count,
 #ifdef MPI_STRESS_CUDA
     CUDA_CALL(cudaMalloc, (void **) &array->msgs[i].gpubuf, size);
 #endif
+#ifdef MPI_STRESS_ONEAPI
+    oneapi_ze_malloc((void **) &array->msgs[i].gpubuf, size);
+#endif
     array->msgs[i].req = MPI_REQUEST_NULL;
     array->msgs[i].poison_seed = 0;
   }
@@ -700,7 +790,7 @@ static void alloc_msg_array (msg_array_t *array, uint32_t count,
 static void preinit_msg (local_state_t *local, msg_state_t *msg,
                          uint32_t data_len, int src_data)
 {
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
   uint8_t *gpubuf = msg->gpubuf;
   msg_hdr_t *gpuhdr = (msg_hdr_t *) gpubuf;
   uint8_t *gpudata = (uint8_t *) (gpuhdr + 1);
@@ -732,6 +822,9 @@ static void preinit_msg (local_state_t *local, msg_state_t *msg,
   }
 #ifdef MPI_STRESS_CUDA
   CUDA_CALL(cudaMemcpy, gpubuf, buf, data_len + sizeof(msg_hdr_t), cudaMemcpyHostToDevice);
+#endif
+#ifdef MPI_STRESS_ONEAPI
+  oneapi_ze_memcpy(gpubuf, buf, data_len + sizeof(msg_hdr_t));
 #endif
 }
 
@@ -783,6 +876,12 @@ static void preinit_msg_array (local_state_t *local, msg_array_t *array,
   }
   CUDA_CALL(cudaDeviceSynchronize);
 #endif
+#ifdef MPI_STRESS_ONEAPI
+  for (i = 0; i < array->count; i++) {
+    oneapi_ze_memcpy(
+      array->msgs[i].gpubuf, array->msgs[i].buf, array->size);
+  }
+#endif
 }
 
 static void free_msg_array (msg_array_t *array)
@@ -792,6 +891,9 @@ static void free_msg_array (msg_array_t *array)
     myfree(array->msgs[i].buf);
 #ifdef MPI_STRESS_CUDA
     CUDA_CALL(cudaFree, array->msgs[i].gpubuf);
+#endif
+#ifdef MPI_STRESS_ONEAPI
+    MPI_STRESS_ONEAPI_ZE_CALL(zeMemFree, ze_context, array->msgs[i].gpubuf);
 #endif
   }
   myfree(array->msgs);
@@ -856,7 +958,7 @@ static int send_one_msg (local_state_t *local, msg_array_t *send_array,
   uint8_t *buf = send_array->msgs[index].buf;
   msg_hdr_t *hdr = (msg_hdr_t *) buf;
   uint8_t *data = (uint8_t *) (hdr + 1);
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
   uint8_t *gpubuf = send_array->msgs[index].gpubuf;
   msg_hdr_t *gpuhdr = (msg_hdr_t *) gpubuf;
   uint8_t *gpudata = (uint8_t *) (gpuhdr + 1);
@@ -883,6 +985,10 @@ static int send_one_msg (local_state_t *local, msg_array_t *send_array,
     if (local->params.use_gpu_send)
       CUDA_CALL(cudaMemcpy, gpubuf, buf, sizeof(msg_hdr_t), cudaMemcpyHostToDevice);
 #endif
+#ifdef MPI_STRESS_ONEAPI
+    if (local->params.use_gpu_send)
+      oneapi_ze_memcpy(gpubuf, buf, sizeof(msg_hdr_t));
+#endif
   } else {
     tag = 1;
     data = (uint8_t *) (((small_msg_hdr_t*) send_array->msgs[index].buf) + 1);
@@ -891,9 +997,13 @@ static int send_one_msg (local_state_t *local, msg_array_t *send_array,
     if (local->params.use_gpu_send)
       CUDA_CALL(cudaMemcpy, gpubuf, buf, size, cudaMemcpyHostToDevice);
 #endif
+#ifdef MPI_STRESS_ONEAPI
+    if (local->params.use_gpu_send)
+      oneapi_ze_memcpy(gpubuf, buf, size);
+#endif
   }
 
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
   if (local->params.use_gpu_send)
     result = local->params.mpi_send_fn(gpuhdr, size, MPI_BYTE, dst, tag,
 				       MPI_COMM_WORLD, send_req);
@@ -930,7 +1040,7 @@ static int poll_for_msgs (local_state_t *local, msg_array_t *recv_array,
     uint8_t *buf = msg->buf;
     msg_hdr_t *hdr = (msg_hdr_t *) buf;
     uint8_t *data = (uint8_t *) (hdr + 1);
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
     uint8_t *gpubuf = msg->gpubuf;
     msg_hdr_t *gpuhdr = (msg_hdr_t *) gpubuf;
     uint8_t *gpudata = (uint8_t *) (gpuhdr + 1);
@@ -973,6 +1083,10 @@ static int poll_for_msgs (local_state_t *local, msg_array_t *recv_array,
 	  if (local->params.use_gpu_recv)
 	    CUDA_CALL(cudaMemcpy, buf, gpubuf, irecv_size, cudaMemcpyDeviceToHost);
 #endif
+#ifdef MPI_STRESS_ONEAPI
+	  if (local->params.use_gpu_recv)
+      oneapi_ze_memcpy(buf, gpubuf, irecv_size);
+#endif
           errors += validate_msg(stdout, local, msg, hdr, src, tag,
 				 count, data);
           if (local->params.verbose >= 2) {
@@ -989,7 +1103,7 @@ static int poll_for_msgs (local_state_t *local, msg_array_t *recv_array,
       }
     }
     if (*recv_req == MPI_REQUEST_NULL) {
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
       if (local->params.use_gpu_recv)
         result = MPI_Irecv(gpuhdr, irecv_size, MPI_BYTE, MPI_ANY_SOURCE,
                            MPI_ANY_TAG, MPI_COMM_WORLD, recv_req);
@@ -1177,8 +1291,9 @@ int check_recv_validate_buf(local_state_t *local, uint32_t msgs){
   case SMALL_ONE_BYTE:
     for (i = 0; i < 256; i++) {
       if (local->recv_validate_buf) {
-	if (local->recv_validate_buf[i] != ((msgs / 256) + (i < msgs % 256))) {
-	  printf("smallmsg error: recv_buf[%d] = %d, expected %d\n", i, local->recv_validate_buf[i], msgs/256);
+	uint8_t expected = (msgs / 256) + (i < msgs % 256);
+	if (local->recv_validate_buf[i] != expected) {
+	  printf("smallmsg error: recv_buf[%d] = %d, expected %d\n", i, local->recv_validate_buf[i], expected);
 	  errors++;
 	}
       }
@@ -1740,7 +1855,7 @@ static const int DEFAULT_MIN_MSGS = 100;
 static const int DEFAULT_MAX_MSGS = 10000;
 static const int DEFAULT_MAX_DATA = 1024 * 1024 * 1024;
 
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
 static const int DEFAULT_WINDOW_SIZE = 4;
 #else
 static const int DEFAULT_WINDOW_SIZE = 20;
@@ -1853,7 +1968,7 @@ static params_t get_params (int argc, char **argv,
   params.wait_on_start = 0;				/* -W %d */
   params.wait_on_exit = 0;				/* -W %d */
   params.use_small_messages = 0;			/* -y */
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
   params.use_gpu_send = 1;				/* D D */
   params.use_gpu_recv = 1;
 #else
@@ -2040,13 +2155,13 @@ static params_t get_params (int argc, char **argv,
   if (optind < argc) {
     if (0 == strcmp(argv[optind], "H"))
       params.use_gpu_send = 0;
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
     else if (0 == strcmp(argv[optind], "D"))
       params.use_gpu_send = 1;
 #endif
     else {
       if (comm_rank == 0) {
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
         fprintf(stderr, "Error: Invalid send device '%s', must be 'H' or 'D\n", argv[optind]);
 #else
         fprintf(stderr, "Error: Invalid send device '%s', must be 'H'\n", argv[optind]);
@@ -2059,13 +2174,13 @@ static params_t get_params (int argc, char **argv,
   if (optind < argc) {
     if (0 == strcmp(argv[optind], "H"))
       params.use_gpu_recv = 0;
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
     else if (0 == strcmp(argv[optind], "D"))
       params.use_gpu_recv = 1;
 #endif
     else {
       if (comm_rank == 0) {
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
         fprintf(stderr, "Error: Invalid recv device '%s', must be 'H' or 'D\n", argv[optind]);
 #else
         fprintf(stderr, "Error: Invalid recv device '%s', must be 'H'\n", argv[optind]);
@@ -2232,6 +2347,32 @@ int main (int argc, char **argv)
   }
 #endif
 
+#ifdef MPI_STRESS_ONEAPI
+  MPI_STRESS_ONEAPI_ZE_CALL(zeInit, ZE_INIT_FLAG_GPU_ONLY);
+
+  uint32_t ze_driver_count = 1, ze_device_count = 1;
+  MPI_STRESS_ONEAPI_ZE_CALL(zeDriverGet, &ze_driver_count, &ze_driver);
+
+  ze_context_desc_t ctxtDesc = { ZE_STRUCTURE_TYPE_CONTEXT_DESC, NULL, 0 };
+  MPI_STRESS_ONEAPI_ZE_CALL(zeContextCreate, ze_driver, &ctxtDesc, &ze_context);
+
+  MPI_STRESS_ONEAPI_ZE_CALL(zeDeviceGet, ze_driver, &ze_device_count, &ze_device);
+
+  ze_command_queue_desc_t ze_cq_desc = {
+    .flags = 0,
+    .mode = ZE_COMMAND_QUEUE_MODE_DEFAULT,
+    .priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL,
+    .ordinal = 0 /* this must be less than device_properties.numAsyncComputeEngines */
+  };
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueCreate, ze_context, ze_device, &ze_cq_desc, &ze_cq);
+
+  ze_command_list_desc_t ze_cl_desc = { .flags = 0 };
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListCreate, ze_context, ze_device, &ze_cl_desc, &ze_cl);
+
+  int devCnt = ze_device_count;
+  int i = 0;
+#endif
+
   MPI_Init(&argc, &argv);
   MPI_Comm_rank(MPI_COMM_WORLD, &comm_rank);
   MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
@@ -2239,8 +2380,10 @@ int main (int argc, char **argv)
   gethostname(myhostname, MPI_MAX_PROCESSOR_NAME);
 
   params = get_params(argc, argv, comm_rank, comm_size);
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA)
   printf("Rank %d: Using Cuda Device %d (%d total)\n", comm_rank, i, devCnt);
+#elif defined(MPI_STRESS_ONEAPI)
+  printf("Rank %d: Using OneAPI Device %d (%d total)\n", comm_rank, i, devCnt);
 #endif
 
   if (params.wait_on_start) {
@@ -2257,7 +2400,7 @@ int main (int argc, char **argv)
     char s[26];
     ctime_r(&t, s);
     printf("Start mpi_stress at %s", s);
-#ifdef MPI_STRESS_CUDA
+#if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
     printf("Send Buffer on %s and Receive Buffer on %s\n",
 	   params.use_gpu_send ? "DEVICE (D)" : "HOST (H)",
 	   params.use_gpu_recv ? "DEVICE (D)" : "HOST (H)");
@@ -2313,6 +2456,11 @@ int main (int argc, char **argv)
   if (curesult != CUDA_SUCCESS) {
     exit(1);
   }
+#endif
+#ifdef MPI_STRESS_ONEAPI
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListDestroy, ze_cl);
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueDestroy, ze_cq);
+  MPI_STRESS_ONEAPI_ZE_CALL(zeContextDestroy, ze_context);
 #endif
 
   return total_errors ? EXIT_FAILURE : EXIT_SUCCESS;

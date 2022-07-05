@@ -1,6 +1,6 @@
 Name: eth-mpi-apps
-Version: 11.2.0.0
-Release: 259%{?dist}
+Version: 11.3.0.0
+Release: 130%{?dist}
 Summary: Intel MPI benchmarks and Applications used by eth-fast-fabric
 Group: System Environment/Libraries
 License: BSD and HPL and CPL 1.0
@@ -28,7 +28,7 @@ Contains applications and source for testing MPI performance in conjunction with
 
 %install
 
-%define mpi_apps_files bandwidth latency hpl-2.3 imb osu-micro-benchmarks-5.6.3 mpi_multibw mpi_stress
+%define mpi_apps_files bandwidth latency hpl-2.3 imb osu-micro-benchmarks-5.9 mpi_multibw mpi_stress
 
 
 mkdir -p $RPM_BUILD_ROOT/usr/src/eth/mpi_apps

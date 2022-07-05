@@ -1,6 +1,6 @@
 /*****************************************************************************
  *                                                                           *
- * Copyright 2003-2020 Intel Corporation.                                    *
+ * Copyright Intel Corporation.                                              *
  *                                                                           *
  *****************************************************************************
 
@@ -167,8 +167,5 @@ typedef float assign_type;
 #define BUF_VALUE(rank,i)  (0.1*((rank)+1)+(float)((i)))
 
 #endif
-
-/* maximum window size of messages*/
-#define MAX_WIN_SIZE 64 
 
 #endif

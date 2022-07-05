@@ -1,6 +1,6 @@
 /*****************************************************************************
  *                                                                           *
- * Copyright 2003-2020 Intel Corporation.                                    *
+ * Copyright Intel Corporation.                                              *
  *                                                                           *
  *****************************************************************************
 
@@ -334,7 +334,7 @@ Input variables:
 #ifndef MPIIO
         else {
             int peers = c_info->num_procs / 2;
-            msgrate = (Bmark->scale_bw * SCALE * MAX_WIN_SIZE * peers) / timing[MAX].times[PURE];
+            msgrate = (Bmark->scale_bw * SCALE * c_info->max_win_size * peers) / timing[MAX].times[PURE];
             throughput = MEGA * msgrate * size;
         }
 #endif
