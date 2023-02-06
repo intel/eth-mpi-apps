@@ -69,9 +69,23 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 
 #ifdef MPI_STRESS_ONEAPI
+
+#define MAX_ZE_DEVICES       8
+
+struct ze_dev_ctxt {
+	ze_device_handle_t dev;
+	uint32_t ordinal; /* CmdQGrp ordinal for the 1st copy_only engine */
+	uint32_t index;   /* Cmdqueue index within the CmdQGrp */
+	uint32_t num_queues; /* Number of queues in the CmdQGrp */
+	ze_command_queue_handle_t cq;
+	ze_command_list_handle_t cl;
+};
+
 static ze_context_handle_t ze_context = NULL;
 static ze_driver_handle_t ze_driver = NULL;
-static ze_device_handle_t ze_device = NULL;
+static ze_device_handle_t devices[MAX_ZE_DEVICES];
+static struct ze_dev_ctxt ze_devices[MAX_ZE_DEVICES];
+static struct ze_dev_ctxt *cur_ze_dev = NULL;
 static ze_command_queue_handle_t ze_cq = NULL;
 static ze_command_list_handle_t ze_cl = NULL;
 
@@ -132,6 +146,43 @@ static const char* psmi_oneapi_ze_result_to_string(const ze_result_t result) {
 #undef ZE_RESULT_CASE
 }
 
+static void *mycalloc (size_t nmemb, size_t size);
+static void myfree (void *ptr);
+static void oneapi_ze_find_copy_only_engine(ze_device_handle_t dev,
+					      struct ze_dev_ctxt *ctxt)
+{
+	uint32_t count = 0;
+	ze_command_queue_group_properties_t *props = NULL;
+	int i;
+
+	/* Set the default */
+	ctxt->ordinal = 0;
+	ctxt->index = 0;
+	ctxt->num_queues = 1;
+	MPI_STRESS_ONEAPI_ZE_CALL(zeDeviceGetCommandQueueGroupProperties, dev,
+			    &count, NULL);
+	props = mycalloc(count, sizeof(*props));
+	if (!props) {
+		fprintf(stderr, "Failed to allocate mem for CmdQ Grp\n");
+		return;
+	}
+	MPI_STRESS_ONEAPI_ZE_CALL(zeDeviceGetCommandQueueGroupProperties, dev,
+			    &count, props);
+
+	/* Select the first copy-only engine group if possible */
+	for (i = count - 1; i >= 0; i--) {
+		if ((props[i].flags &
+		    ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY) &&
+		    !(props[i].flags &
+		      ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE)) {
+			ctxt->ordinal = i;
+			ctxt->num_queues = props[i].numQueues;
+			break;
+		}
+	}
+	myfree(props);
+}
+
 static void oneapi_ze_malloc(void **pptr, size_t size)
 {
   size_t alignment = 64;
@@ -140,7 +191,7 @@ static void oneapi_ze_malloc(void **pptr, size_t size)
     .flags = 0,
     .ordinal = 0
   };
-  MPI_STRESS_ONEAPI_ZE_CALL(zeMemAllocDevice, ze_context, &dev_desc, size, alignment, ze_device, pptr);
+  MPI_STRESS_ONEAPI_ZE_CALL(zeMemAllocDevice, ze_context, &dev_desc, size, alignment, cur_ze_dev->dev, pptr);
 }
 
 static void oneapi_ze_memcpy(void *dstptr, const void *srcptr, size_t size) {
@@ -149,6 +200,33 @@ static void oneapi_ze_memcpy(void *dstptr, const void *srcptr, size_t size) {
   MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueExecuteCommandLists, ze_cq, 1, &ze_cl, NULL);
   MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueSynchronize, ze_cq, UINT32_MAX);
   MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListReset, ze_cl);
+}
+
+static void oneapi_ze_cmd_create(ze_device_handle_t dev, struct ze_dev_ctxt *ctxt)
+{
+	ze_command_queue_desc_t ze_cq_desc = {
+		.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC,
+		.flags = 0,
+		.mode = ZE_COMMAND_QUEUE_MODE_DEFAULT,
+		.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL,
+		.ordinal = 0 /* this must be less than device_properties.numAsyncComputeEngines */
+	};
+	ze_command_list_desc_t ze_cl_desc = {
+		.stype = ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC,
+		.flags = 0
+	};
+
+	oneapi_ze_find_copy_only_engine(dev, ctxt);
+	ze_cq_desc.ordinal = ctxt->ordinal;
+	ze_cq_desc.index = ctxt->index;
+
+	MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueCreate, ze_context, dev,
+			    &ze_cq_desc, &ctxt->cq);
+
+	ze_cl_desc.commandQueueGroupOrdinal = ctxt->ordinal;
+	MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListCreate, ze_context, dev, &ze_cl_desc,
+			    &ctxt->cl);
+	ctxt->dev = dev;
 }
 #endif // MPI_STRESS_ONEAPI
 
@@ -2350,27 +2428,41 @@ int main (int argc, char **argv)
 #ifdef MPI_STRESS_ONEAPI
   MPI_STRESS_ONEAPI_ZE_CALL(zeInit, ZE_INIT_FLAG_GPU_ONLY);
 
+  int i;
+  int devCnt;
+  int rank = 0;
+  char *rank_str;
   uint32_t ze_driver_count = 1, ze_device_count = 1;
+
+  if ((rank_str = getenv("OMPI_COMM_WORLD_LOCAL_RANK")) != NULL)
+    rank = atoi(rank_str);
+  else if ((rank_str = getenv("MV2_COMM_WORLD_LOCAL_RANK")) != NULL)
+    rank = atoi(rank_str);
+  else if ((rank_str = getenv("MPI_LOCALRANKID")) != NULL)
+    rank = atoi(rank_str);
+  else if ((rank_str = getenv("PMI_RANK")) != NULL)
+    rank = atoi(rank_str);
+
   MPI_STRESS_ONEAPI_ZE_CALL(zeDriverGet, &ze_driver_count, &ze_driver);
 
   ze_context_desc_t ctxtDesc = { ZE_STRUCTURE_TYPE_CONTEXT_DESC, NULL, 0 };
   MPI_STRESS_ONEAPI_ZE_CALL(zeContextCreate, ze_driver, &ctxtDesc, &ze_context);
 
-  MPI_STRESS_ONEAPI_ZE_CALL(zeDeviceGet, ze_driver, &ze_device_count, &ze_device);
+  ze_device_count = 0;
+  MPI_STRESS_ONEAPI_ZE_CALL(zeDeviceGet, ze_driver, &ze_device_count, NULL);
+  if (ze_device_count > MAX_ZE_DEVICES)
+    ze_device_count = MAX_ZE_DEVICES;
+  MPI_STRESS_ONEAPI_ZE_CALL(zeDeviceGet, ze_driver, &ze_device_count, devices);
 
-  ze_command_queue_desc_t ze_cq_desc = {
-    .flags = 0,
-    .mode = ZE_COMMAND_QUEUE_MODE_DEFAULT,
-    .priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL,
-    .ordinal = 0 /* this must be less than device_properties.numAsyncComputeEngines */
-  };
-  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueCreate, ze_context, ze_device, &ze_cq_desc, &ze_cq);
+  for (i = 0; i < ze_device_count; i++)
+    oneapi_ze_cmd_create(devices[i], &ze_devices[i]);
 
-  ze_command_list_desc_t ze_cl_desc = { .flags = 0 };
-  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListCreate, ze_context, ze_device, &ze_cl_desc, &ze_cl);
-
-  int devCnt = ze_device_count;
-  int i = 0;
+  devCnt = ze_device_count;
+  srandom((unsigned int)time(NULL));
+  i = random() % devCnt;
+  cur_ze_dev = &ze_devices[i];
+  ze_cq = cur_ze_dev->cq;
+  ze_cl = cur_ze_dev->cl;
 #endif
 
   MPI_Init(&argc, &argv);

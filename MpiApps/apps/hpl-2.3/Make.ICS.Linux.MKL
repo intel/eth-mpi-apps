@@ -212,11 +212,7 @@ HPL_DEFS     = $(F2CDEFS) $(HPL_OPTS) $(HPL_INCLUDES)
 #
 CC           = $(MPICC)
 CCNOOPT      = $(HPL_DEFS) 
-ifneq (,$(findstring icc,$(CC)))
-CCFLAGS = $(HPL_DEFS) -fomit-frame-pointer -O3 -funroll-loops -DMKL_ILP64 -m64 -mkl=cluster
-else
-CCFLAGS = $(HPL_DEFS) -fomit-frame-pointer -O3 -funroll-loops -DMKL_ILP64 -m64
-endif
+CCFLAGS = $(HPL_DEFS) -fomit-frame-pointer -O3 -funroll-loops -DMKL_ILP64 -m64 -qmkl=cluster
 #
 LINKER       = $(MPICC)
 LINKFLAGS    = $(CCFLAGS)
