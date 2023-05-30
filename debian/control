@@ -1,0 +1,16 @@
+Source: eth-mpi-apps
+Maintainer: Breyer, Scott J <scott.j.breyer@intel.com>
+Section: misc
+Priority: optional
+Build-Depends: debhelper (>= 12~)
+Standards-Version: 4.5.1
+Homepage: TBD
+Rules-Requires-Root: no
+
+Package: eth-mpi-apps
+Priority: optional
+Architecture: linux-any
+Depends: ${misc:Depends}
+Description: Intel MPI benchmarks and Applications used by eth-tools-fastfabric
+ Contains applications and source for testing MPI performance in
+ conjunction with eth-tools-fastfabric or stand alone.
