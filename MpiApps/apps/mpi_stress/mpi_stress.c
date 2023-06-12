@@ -839,7 +839,8 @@ static int validate_msg (FILE *out, local_state_t *local, msg_state_t *msg,
 }
 
 static void alloc_msg_array (msg_array_t *array, uint32_t count,
-			     uint32_t size, uint32_t align, uint32_t hdr_size)
+			     uint32_t size, uint32_t align, uint32_t hdr_size,
+			     uint8_t use_gpubuf)
 {
   uint32_t i;
 
@@ -855,10 +856,16 @@ static void alloc_msg_array (msg_array_t *array, uint32_t count,
   for (i = 0; i < count; i++) {
     array->msgs[i].buf = (uint8_t *) mymemalign(size, align);
 #ifdef MPI_STRESS_CUDA
-    CUDA_CALL(cudaMalloc, (void **) &array->msgs[i].gpubuf, size);
+    if (use_gpubuf)
+      CUDA_CALL(cudaMalloc, (void **) &array->msgs[i].gpubuf, size);
+    else
+      array->msgs[i].gpubuf = NULL;
 #endif
 #ifdef MPI_STRESS_ONEAPI
-    oneapi_ze_malloc((void **) &array->msgs[i].gpubuf, size);
+    if (use_gpubuf)
+      oneapi_ze_malloc((void **) &array->msgs[i].gpubuf, size);
+    else
+      array->msgs[i].gpubuf = NULL;
 #endif
     array->msgs[i].req = MPI_REQUEST_NULL;
     array->msgs[i].poison_seed = 0;
@@ -899,10 +906,12 @@ static void preinit_msg (local_state_t *local, msg_state_t *msg,
     }
   }
 #ifdef MPI_STRESS_CUDA
-  CUDA_CALL(cudaMemcpy, gpubuf, buf, data_len + sizeof(msg_hdr_t), cudaMemcpyHostToDevice);
+  if (gpubuf)
+    CUDA_CALL(cudaMemcpy, gpubuf, buf, data_len + sizeof(msg_hdr_t), cudaMemcpyHostToDevice);
 #endif
 #ifdef MPI_STRESS_ONEAPI
-  oneapi_ze_memcpy(gpubuf, buf, data_len + sizeof(msg_hdr_t));
+  if (gpubuf)
+    oneapi_ze_memcpy(gpubuf, buf, data_len + sizeof(msg_hdr_t));
 #endif
 }
 
@@ -936,6 +945,9 @@ static void preinit_msg_array (local_state_t *local, msg_array_t *array,
 {
   uint32_t i;
   uint32_t max_data_len;
+#ifdef MPI_STRESS_CUDA
+  uint8_t need_cuda_dev_sync = 0;
+#endif
   if (local->test_mode == STANDARD) {
     max_data_len = array->size - sizeof(msg_hdr_t);
     for (i = 0; i < array->count; i++) {
@@ -949,15 +961,20 @@ static void preinit_msg_array (local_state_t *local, msg_array_t *array,
   }
 #ifdef MPI_STRESS_CUDA
   for (i = 0; i < array->count; i++) {
-    CUDA_CALL(cudaMemcpyAsync, array->msgs[i].gpubuf, array->msgs[i].buf,
-	      array->size, cudaMemcpyHostToDevice, 0);
+    if (array->msgs[i].gpubuf) {
+      CUDA_CALL(cudaMemcpyAsync, array->msgs[i].gpubuf, array->msgs[i].buf,
+        array->size, cudaMemcpyHostToDevice, 0);
+      need_cuda_dev_sync |= 1;
+    }
   }
-  CUDA_CALL(cudaDeviceSynchronize);
+  if (need_cuda_dev_sync)
+    CUDA_CALL(cudaDeviceSynchronize);
 #endif
 #ifdef MPI_STRESS_ONEAPI
   for (i = 0; i < array->count; i++) {
-    oneapi_ze_memcpy(
-      array->msgs[i].gpubuf, array->msgs[i].buf, array->size);
+    if (array->msgs[i].gpubuf) {
+      oneapi_ze_memcpy(array->msgs[i].gpubuf, array->msgs[i].buf, array->size);
+    }
   }
 #endif
 }
@@ -968,10 +985,16 @@ static void free_msg_array (msg_array_t *array)
   for (i = 0; i < array->count; i++) {
     myfree(array->msgs[i].buf);
 #ifdef MPI_STRESS_CUDA
-    CUDA_CALL(cudaFree, array->msgs[i].gpubuf);
+    if (array->msgs[i].gpubuf) {
+      CUDA_CALL(cudaFree, array->msgs[i].gpubuf);
+      array->msgs[i].gpubuf = NULL;
+    }
 #endif
 #ifdef MPI_STRESS_ONEAPI
-    MPI_STRESS_ONEAPI_ZE_CALL(zeMemFree, ze_context, array->msgs[i].gpubuf);
+    if (array->msgs[i].gpubuf) {
+      MPI_STRESS_ONEAPI_ZE_CALL(zeMemFree, ze_context, array->msgs[i].gpubuf);
+      array->msgs[i].gpubuf = NULL;
+    }
 #endif
   }
   myfree(array->msgs);
@@ -1278,12 +1301,13 @@ static int run_random_size (local_state_t *local, uint32_t msgs,
   int result;
   double total_size = 0.0;
   double sum_total_size = 0.0;
+  uint8_t use_gpubuf = (local->params.use_gpu_send || local->params.use_gpu_recv);
 
   alloc_msg_array(&send_array, local->params.window_size,
-                  max_size, local->params.align, 0);
+                  max_size, local->params.align, 0, use_gpubuf);
   preinit_msg_array(local, &send_array, 1);
   alloc_msg_array(&recv_array, local->params.window_size,
-                  max_size, local->params.align, 0);
+                  max_size, local->params.align, 0, use_gpubuf);
   preinit_msg_array(local, &recv_array, 0);
 
   local->completed = 0;
@@ -1400,6 +1424,7 @@ static int run_one_size(local_state_t *local, uint32_t msgs, uint32_t size)
   msg_array_t send_array, recv_array;
   int result;
   uint32_t hdr_size;
+  uint8_t use_gpubuf = (local->params.use_gpu_send || local->params.use_gpu_recv);
 
   switch (local->test_mode) {
   case SMALL_ONE_BYTE:
@@ -1416,9 +1441,9 @@ static int run_one_size(local_state_t *local, uint32_t msgs, uint32_t size)
   }
 
   alloc_msg_array(&send_array, local->params.window_size,
-		  size, local->params.align, hdr_size);
+		  size, local->params.align, hdr_size, use_gpubuf);
   alloc_msg_array(&recv_array, local->params.window_size,
-		  size, local->params.align, hdr_size);
+		  size, local->params.align, hdr_size, use_gpubuf);
 
   switch (local->test_mode) {
   case SMALL_ONE_BYTE:
@@ -1534,13 +1559,14 @@ static int run_one_misaligned_size (local_state_t *local, uint32_t msgs, uint32_
   msg_array_t send_array, recv_array;
   int result;
   int offset_tx, offset_rx;
+  uint8_t use_gpubuf = (local->params.use_gpu_send || local->params.use_gpu_recv);
 
   local->params.align = 8;
 
   alloc_msg_array(&send_array, local->params.window_size,
-		  size+8, local->params.align, 0);
+		  size+8, local->params.align, 0, use_gpubuf);
   alloc_msg_array(&recv_array, local->params.window_size,
-		  size+8, local->params.align, 0);
+		  size+8, local->params.align, 0, use_gpubuf);
 
   send_array.size -= 8;
   recv_array.size -= 8;
@@ -1665,7 +1691,6 @@ static int run_misaligned_sizes (local_state_t *local)
 static int run_small_sizes (local_state_t *local)
 {
   uint32_t msg_size;
-  uint32_t msgs;
   int errors = 0;
 
   if (local->comm_rank == 0) {
@@ -1678,7 +1703,7 @@ static int run_small_sizes (local_state_t *local)
   msg_size = 1;
   local->test_mode = SMALL_ONE_BYTE;
   while (msg_size <= 2) {
-    msgs = (msg_size == 0) ? 0 : local->params.max_data / msg_size;
+    uint32_t msgs = local->params.max_data / msg_size;
     msgs = MAX(msgs, local->params.min_msgs);
     msgs = MIN(msgs, local->params.max_msgs);
 
@@ -1689,7 +1714,7 @@ static int run_small_sizes (local_state_t *local)
 
   /* test 3-32B */
   while (msg_size <= 32) {
-    uint32_t msgs = (msg_size == 0) ? 0 : local->params.max_data / msg_size;
+    uint32_t msgs = local->params.max_data / msg_size;
     msgs = MAX(msgs, local->params.min_msgs);
     msgs = MIN(msgs, local->params.max_msgs);
 
@@ -1867,7 +1892,7 @@ static void init_send_mapping (local_state_t *local)
 }
 
 
-int run (params_t params, int comm_rank, int comm_size, uint32_t seed)
+int run (params_t* params, int comm_rank, int comm_size, uint32_t seed)
 {
   local_state_t local;
   uint32_t i;
@@ -1879,7 +1904,7 @@ int run (params_t params, int comm_rank, int comm_size, uint32_t seed)
   assert(flag);
 
   memset(&local, 0, sizeof(local));
-  local.params = params;
+  local.params = *params;
   local.seed = seed;
   local.peers = mycalloc(comm_size, sizeof(peer_state_t));
   local.comm_rank = comm_rank;
@@ -1911,8 +1936,8 @@ int run (params_t params, int comm_rank, int comm_size, uint32_t seed)
       result = MPI_Barrier(MPI_COMM_WORLD);
       validate_result(&local, "MPI_Barrier", result);
       if (i == (uint32_t) local.comm_rank && local_errors) {
-        printf("Rank %d: %s, local errors = %d\n", 
-               local.comm_rank, (local_errors ? "FAILED" : "PASSED"),
+        printf("Rank %d: FAILED, local errors = %d\n",
+               local.comm_rank,
                local_errors);
         fflush(stdout);
       }
@@ -2001,57 +2026,56 @@ static void get_help (int argc, char **argv)
          "interpreted in terms of the features enabled.\n");
 }
 
-static params_t get_params (int argc, char **argv,
-                            int comm_rank, int comm_size)
+static void get_params (int argc, char **argv,
+                            int comm_rank, int comm_size, params_t* params)
 {
-  params_t params;
   int option;
   int result = EXIT_SUCCESS;
   int run = 1;
   const char *optlist = "a:Ab:cdD:eE:g:G:hiI:l:L:m:M:n:OpPqrRsSt:uvw:W:xyzZ";
 
   /* set default parameters */
-  params.verbose = 0;					/* -v */
-  params.progress = 0;					/* -p */
-  params.show_options = 0;				/* -O */
-  params.poison = 0;					/* -P */
-  params.zero = 0;					/* -Z */
-  params.quiet = 0;					/* -q */
-  params.include_self = 0;     				/* -s */
-  params.include_shm = 0;				/* -i */
-  params.use_crc_check = 0;				/* -c */
-  params.use_xor_check = 0;				/* -x */
-  params.data_check = 0;				/* -d */
-  params.use_random_data = 0;				/* -r */
-  params.round_robin = 0;				/* -R */
-  params.grid_ndims = 0;				/* -g %d or -G %d */
-  params.periodic_grid = 0;				/* -g %d or -G %d */
-  params.uni_grid = 0;					/* -u */
-  params.use_random_length = 0;				/* -e */
-  params.use_misaligned_data = 0;			/* -A */
-  params.repeats = DEFAULT_REPS;	       		/* -n %u */
-  params.runtime_mins = 0;				/* -t %u */
-  params.min_msg_size = DEFAULT_MIN_MSG_SIZE;		/* -l %u */
-  params.max_msg_size = DEFAULT_MAX_MSG_SIZE;		/* -m %u */
-  params.incr_msg_size = 0;				/* -I %u */
-  params.min_msgs = DEFAULT_MIN_MSGS;			/* -L %u */
-  params.max_msgs = DEFAULT_MAX_MSGS;			/* -M %u */
-  params.max_data = DEFAULT_MAX_DATA;			/* -D %u */
-  params.window_size = DEFAULT_WINDOW_SIZE;		/* -w %u */
-  params.align = 0;					/* -a %u */
-  params.initial_byte = DEFAULT_INITIAL_BYTE;		/* -b %u */
-  params.mpi_send_fn = MPI_Isend;			/* -S */
-  params.mpi_send_fn_name = "MPI_Isend";		/* -S */
-  params.max_errors = MAX_ERRORS;			/* -E %d */
-  params.wait_on_start = 0;				/* -W %d */
-  params.wait_on_exit = 0;				/* -W %d */
-  params.use_small_messages = 0;			/* -y */
+  params->verbose = 0;					/* -v */
+  params->progress = 0;					/* -p */
+  params->show_options = 0;				/* -O */
+  params->poison = 0;					/* -P */
+  params->zero = 0;					/* -Z */
+  params->quiet = 0;					/* -q */
+  params->include_self = 0;     				/* -s */
+  params->include_shm = 0;				/* -i */
+  params->use_crc_check = 0;				/* -c */
+  params->use_xor_check = 0;				/* -x */
+  params->data_check = 0;				/* -d */
+  params->use_random_data = 0;				/* -r */
+  params->round_robin = 0;				/* -R */
+  params->grid_ndims = 0;				/* -g %d or -G %d */
+  params->periodic_grid = 0;				/* -g %d or -G %d */
+  params->uni_grid = 0;					/* -u */
+  params->use_random_length = 0;				/* -e */
+  params->use_misaligned_data = 0;			/* -A */
+  params->repeats = DEFAULT_REPS;	       		/* -n %u */
+  params->runtime_mins = 0;				/* -t %u */
+  params->min_msg_size = DEFAULT_MIN_MSG_SIZE;		/* -l %u */
+  params->max_msg_size = DEFAULT_MAX_MSG_SIZE;		/* -m %u */
+  params->incr_msg_size = 0;				/* -I %u */
+  params->min_msgs = DEFAULT_MIN_MSGS;			/* -L %u */
+  params->max_msgs = DEFAULT_MAX_MSGS;			/* -M %u */
+  params->max_data = DEFAULT_MAX_DATA;			/* -D %u */
+  params->window_size = DEFAULT_WINDOW_SIZE;		/* -w %u */
+  params->align = 0;					/* -a %u */
+  params->initial_byte = DEFAULT_INITIAL_BYTE;		/* -b %u */
+  params->mpi_send_fn = MPI_Isend;			/* -S */
+  params->mpi_send_fn_name = "MPI_Isend";		/* -S */
+  params->max_errors = MAX_ERRORS;			/* -E %d */
+  params->wait_on_start = 0;				/* -W %d */
+  params->wait_on_exit = 0;				/* -W %d */
+  params->use_small_messages = 0;			/* -y */
 #if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
-  params.use_gpu_send = 1;				/* D D */
-  params.use_gpu_recv = 1;
+  params->use_gpu_send = 1;				/* D D */
+  params->use_gpu_recv = 1;
 #else
-  params.use_gpu_send = 0;				/* H H */
-  params.use_gpu_recv = 0;
+  params->use_gpu_send = 0;				/* H H */
+  params->use_gpu_recv = 0;
 #endif
 
   /* get parameters from command line options */
@@ -2060,46 +2084,46 @@ static params_t get_params (int argc, char **argv,
       case 'a': {
 	/* Note should be power-of-2 and multiple of sizeof(void*).
          * These are not checked here, but will be by posix_memalign() */
-        params.align = mystrtoul(optarg, NULL, 0);
+        params->align = mystrtoul(optarg, NULL, 0);
         break;
       }
       case 'A': {
-        params.use_misaligned_data = 1;
+        params->use_misaligned_data = 1;
         break;
       }
       case 'b': {
 	/* I just mask down to a byte value without checking its range. */
-        params.initial_byte = mystrtoul(optarg, NULL, 0) & 0xff;
+        params->initial_byte = mystrtoul(optarg, NULL, 0) & 0xff;
         break;
       }
       case 'c' : {
-        params.use_crc_check = 1;
+        params->use_crc_check = 1;
         break;
       }
       case 'd' : {
-        params.data_check = 1;
+        params->data_check = 1;
         break;
       }
       case 'D': {
-        params.max_data = mystrtoul(optarg, NULL, 0);
+        params->max_data = mystrtoul(optarg, NULL, 0);
         break;
       }
       case 'e': {
-        params.use_random_length = 1;
+        params->use_random_length = 1;
         break;
       }
       case 'E': {
-        params.max_errors = mystrtol(optarg, NULL, 0);
+        params->max_errors = mystrtol(optarg, NULL, 0);
         break;
       }
       case 'g': {
-        params.grid_ndims = mystrtol(optarg, NULL, 0);
-	params.periodic_grid = 0;
+        params->grid_ndims = mystrtol(optarg, NULL, 0);
+	params->periodic_grid = 0;
 	break;
       }
       case 'G': {
-        params.grid_ndims = mystrtol(optarg, NULL, 0);
-	params.periodic_grid = 1;
+        params->grid_ndims = mystrtol(optarg, NULL, 0);
+	params->periodic_grid = 1;
 	break;
       }
       case 'h' : {
@@ -2107,107 +2131,108 @@ static params_t get_params (int argc, char **argv,
           get_help(argc, argv);
 	}
         run = 0;
+        goto done;
 	break;
       }
       case 'i': {
-        params.include_shm = 1;
+        params->include_shm = 1;
         break;
       }
       case 'I': {
-        params.incr_msg_size = mystrtoul(optarg, NULL, 0);
+        params->incr_msg_size = mystrtoul(optarg, NULL, 0);
         break;
       }
       case 'l': {
-        params.min_msg_size = mystrtoul(optarg, NULL, 0);
+        params->min_msg_size = mystrtoul(optarg, NULL, 0);
         break;
       }
       case 'L': {
-        params.min_msgs = mystrtoul(optarg, NULL, 0);
+        params->min_msgs = mystrtoul(optarg, NULL, 0);
         break;
       }
       case 'm': {
-        params.max_msg_size = mystrtoul(optarg, NULL, 0);
+        params->max_msg_size = mystrtoul(optarg, NULL, 0);
         break;
       }
       case 'M': {
-        params.max_msgs = mystrtoul(optarg, NULL, 0);
+        params->max_msgs = mystrtoul(optarg, NULL, 0);
         break;
       }
       case 'n': {
-        params.repeats = mystrtoul(optarg, NULL, 0);
+        params->repeats = mystrtoul(optarg, NULL, 0);
         break;
       }
       case 'O' : {
-        params.show_options = 1;
+        params->show_options = 1;
         break;
       }
       case 'p' : {
-        params.progress = 1;
+        params->progress = 1;
         break;
       }
       case 'P' : {
-        params.poison = 1;
+        params->poison = 1;
         break;
       }
       case 'q' : {
-        params.quiet = 1;
+        params->quiet = 1;
         break;
       }
       case 'r': {
-        params.use_random_data = 1;
+        params->use_random_data = 1;
         break;
       }
       case 'R': {
-        params.round_robin = 1;
+        params->round_robin = 1;
         break;
       }
       case 's': {
-        params.include_self = 1;
+        params->include_self = 1;
         break;
       }
       case 'S': {
-        params.mpi_send_fn = MPI_Issend;
-        params.mpi_send_fn_name = "MPI_Issend";
+        params->mpi_send_fn = MPI_Issend;
+        params->mpi_send_fn_name = "MPI_Issend";
         break;
       }
       case 't': {
-        params.runtime_mins = mystrtoul(optarg, NULL, 0);
-	params.repeats = UINT32_MAX;
+        params->runtime_mins = mystrtoul(optarg, NULL, 0);
+	params->repeats = UINT32_MAX;
         break;
       }
       case 'u': {
-	params.uni_grid = 1;
+	params->uni_grid = 1;
 	break;
       }
       case 'v' : {
-	params.verbose++;
+	params->verbose++;
 	break;
       }
       case 'w': {
-        params.window_size = mystrtoul(optarg, NULL, 0);
+        params->window_size = mystrtoul(optarg, NULL, 0);
         break;
       }
       case 'W': {
-        params.wait_on_start = mystrtoul(optarg, NULL, 0);
-	params.wait_on_exit = params.wait_on_start;
+        params->wait_on_start = mystrtoul(optarg, NULL, 0);
+	params->wait_on_exit = params->wait_on_start;
         break;
       }
       case 'x' : {
-        params.use_xor_check = 1;
+        params->use_xor_check = 1;
         break;
       }
       case 'y': {
-        params.use_small_messages = 1;
+        params->use_small_messages = 1;
         break;
       }
       case 'z': {
-        params.data_check = 1;
-        params.use_random_data = 1;
-        params.use_xor_check = 1;
+        params->data_check = 1;
+        params->use_random_data = 1;
+        params->use_xor_check = 1;
         break;
       }
       case 'Z' : {
-        params.zero = 1;
+        params->zero = 1;
         break;
       }
       default: {
@@ -2226,16 +2251,17 @@ static params_t get_params (int argc, char **argv,
         }
         result = EXIT_FAILURE;
 	run = 0;
+	goto done;
         break;
       }
     }
   }
   if (optind < argc) {
     if (0 == strcmp(argv[optind], "H"))
-      params.use_gpu_send = 0;
+      params->use_gpu_send = 0;
 #if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
     else if (0 == strcmp(argv[optind], "D"))
-      params.use_gpu_send = 1;
+      params->use_gpu_send = 1;
 #endif
     else {
       if (comm_rank == 0) {
@@ -2251,10 +2277,10 @@ static params_t get_params (int argc, char **argv,
   }
   if (optind < argc) {
     if (0 == strcmp(argv[optind], "H"))
-      params.use_gpu_recv = 0;
+      params->use_gpu_recv = 0;
 #if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
     else if (0 == strcmp(argv[optind], "D"))
-      params.use_gpu_recv = 1;
+      params->use_gpu_recv = 1;
 #endif
     else {
       if (comm_rank == 0) {
@@ -2274,13 +2300,13 @@ static params_t get_params (int argc, char **argv,
     }
     run = 0;
   }
-  if (params.grid_ndims < 0) {
+  if (params->grid_ndims < 0) {
     if (comm_rank == 0) {
       fprintf(stderr, "Error: grid dimensions must not be less than 0\n");
     }
     run = 0;
   }
-  if (params.min_msg_size < (uint32_t) DEFAULT_MIN_MSG_SIZE) {
+  if (params->min_msg_size < (uint32_t) DEFAULT_MIN_MSG_SIZE) {
     if (comm_rank == 0) {
       fprintf(stderr, "Error: minimum message size must be at least %d bytes "
 	    "because of message header\n",
@@ -2288,67 +2314,61 @@ static params_t get_params (int argc, char **argv,
     }
     run = 0;
   }
-  if (params.min_msg_size > params.max_msg_size) {
+  if (params->min_msg_size > params->max_msg_size) {
     if (comm_rank == 0) {
       fprintf(stderr, "Error: min message size must be <= than max msg size\n");
     }
     run = 0;
   }
-  if (params.incr_msg_size < 0) {
-    if (comm_rank == 0) {
-      fprintf(stderr, "Error: message size increment must not be < 0\n");
-    }
-    run = 0;
-  }
-  if (comm_size == 1 && !params.include_self) {
+  if (comm_size == 1 && !params->include_self) {
     get_help(argc, argv);
     fprintf(stderr, "NOTE: Run on more than 1 process or -s to test self.\n");
     run = 0;
   }
-  if (params.poison && params.zero) {
+  if (params->poison && params->zero) {
     if (comm_rank == 0) {
       fprintf(stderr, "Error: poison and zero are mutually exclusive\n");
     }
     run = 0;
   }
-  if (comm_rank == 0 && params.show_options) {
-    printf("Option verbose = %d\n", params.verbose);
-    printf("Option progress = %d\n", params.progress);
-    printf("Option show_options = %d\n", params.show_options);
-    printf("Option poison = %d\n", params.poison);
-    printf("Option zero = %d\n", params.zero);
-    printf("Option quiet = %d\n", params.quiet);
-    printf("Option include_self = %d\n", params.include_self);
-    printf("Option include_shm = %d\n", params.include_shm);
-    printf("Option use_crc_check = %d\n", params.use_crc_check);
-    printf("Option use_xor_check = %d\n", params.use_xor_check);
-    printf("Option data_check = %d\n", params.data_check);
-    printf("Option use_random_data = %d\n", params.use_random_data);
-    printf("Option use_misaligned_data = %d\n", params.use_misaligned_data);
-    printf("Option initial_byte = %d\n", params.initial_byte);
-    printf("Option round_robin = %d\n", params.round_robin);
-    printf("Option grid_ndims = %d\n", params.grid_ndims);
-    printf("Option periodic_grid = %d\n", params.periodic_grid);
-    printf("Option uni_grid = %d\n", params.uni_grid);
-    printf("Option use_random_length = %d\n", params.use_random_length);
-    printf("Option repeats = %u\n", (unsigned) params.repeats);
-    printf("Option runtime_mins = %u\n", (unsigned) params.runtime_mins);
-    printf("Option min_msg_size = %u\n", (unsigned) params.min_msg_size);
-    printf("Option max_msg_size = %u\n", (unsigned) params.max_msg_size);
-    printf("Option incr_msg_size = %u\n", (unsigned) params.incr_msg_size);
-    printf("Option min_msgs = %u\n", (unsigned) params.min_msgs);
-    printf("Option max_msgs = %u\n", (unsigned) params.max_msgs);
-    printf("Option max_data = %u\n", (unsigned) params.max_data);
-    printf("Option window_size = %u\n", (unsigned) params.window_size);
-    printf("Option align = %u\n", (unsigned) params.align);
-    printf("Option mpi_send_fn_name = %s\n", params.mpi_send_fn_name);
-    printf("Option max_errors = %d\n", params.max_errors);
+  if (comm_rank == 0 && params->show_options) {
+    printf("Option verbose = %d\n", params->verbose);
+    printf("Option progress = %d\n", params->progress);
+    printf("Option show_options = %d\n", params->show_options);
+    printf("Option poison = %d\n", params->poison);
+    printf("Option zero = %d\n", params->zero);
+    printf("Option quiet = %d\n", params->quiet);
+    printf("Option include_self = %d\n", params->include_self);
+    printf("Option include_shm = %d\n", params->include_shm);
+    printf("Option use_crc_check = %d\n", params->use_crc_check);
+    printf("Option use_xor_check = %d\n", params->use_xor_check);
+    printf("Option data_check = %d\n", params->data_check);
+    printf("Option use_random_data = %d\n", params->use_random_data);
+    printf("Option use_misaligned_data = %d\n", params->use_misaligned_data);
+    printf("Option initial_byte = %d\n", params->initial_byte);
+    printf("Option round_robin = %d\n", params->round_robin);
+    printf("Option grid_ndims = %d\n", params->grid_ndims);
+    printf("Option periodic_grid = %d\n", params->periodic_grid);
+    printf("Option uni_grid = %d\n", params->uni_grid);
+    printf("Option use_random_length = %d\n", params->use_random_length);
+    printf("Option repeats = %u\n", (unsigned) params->repeats);
+    printf("Option runtime_mins = %u\n", (unsigned) params->runtime_mins);
+    printf("Option min_msg_size = %u\n", (unsigned) params->min_msg_size);
+    printf("Option max_msg_size = %u\n", (unsigned) params->max_msg_size);
+    printf("Option incr_msg_size = %u\n", (unsigned) params->incr_msg_size);
+    printf("Option min_msgs = %u\n", (unsigned) params->min_msgs);
+    printf("Option max_msgs = %u\n", (unsigned) params->max_msgs);
+    printf("Option max_data = %u\n", (unsigned) params->max_data);
+    printf("Option window_size = %u\n", (unsigned) params->window_size);
+    printf("Option align = %u\n", (unsigned) params->align);
+    printf("Option mpi_send_fn_name = %s\n", params->mpi_send_fn_name);
+    printf("Option max_errors = %d\n", params->max_errors);
   }
   if (!run) {
+done:
     MPI_Finalize();
     exit(result);
   }
-  return params;
 }
 
 int main (int argc, char **argv)
@@ -2458,8 +2478,7 @@ int main (int argc, char **argv)
     oneapi_ze_cmd_create(devices[i], &ze_devices[i]);
 
   devCnt = ze_device_count;
-  srandom((unsigned int)time(NULL));
-  i = random() % devCnt;
+  i = rank % devCnt;		/* Get device id based on rank and number of suitable devices */
   cur_ze_dev = &ze_devices[i];
   ze_cq = cur_ze_dev->cq;
   ze_cl = cur_ze_dev->cl;
@@ -2471,7 +2490,7 @@ int main (int argc, char **argv)
   /* MPI_Get_processor_name(myhostname, &r); */
   gethostname(myhostname, MPI_MAX_PROCESSOR_NAME);
 
-  params = get_params(argc, argv, comm_rank, comm_size);
+  get_params(argc, argv, comm_rank, comm_size, &params);
 #if defined(MPI_STRESS_CUDA)
   printf("Rank %d: Using Cuda Device %d (%d total)\n", comm_rank, i, devCnt);
 #elif defined(MPI_STRESS_ONEAPI)
@@ -2506,7 +2525,7 @@ int main (int argc, char **argv)
 
   running = (r < params.repeats);
   while (running) {
-    int errors = run(params, comm_rank, comm_size, 0xCABBA6E5 + comm_rank);
+    int errors = run(&params, comm_rank, comm_size, 0xCABBA6E5 + comm_rank);
     int my_running;
     total_errors += errors;
     now = MPI_Wtime();
