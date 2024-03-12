@@ -1,6 +1,6 @@
 #  # BEGIN_ICS_COPYRIGHT8 ****************************************
 #
-# Copyright (c) 2015-2020, Intel Corporation
+# Copyright (c) 2015-2024, Intel Corporation
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -89,7 +89,7 @@ TOUCH        = touch
 # - Platform identifier ------------------------------------------------
 # ----------------------------------------------------------------------
 #
-ARCH         = ICS.Linux.MKL
+ARCH         = ICS.Linux.MKL-icc
 #
 # ----------------------------------------------------------------------
 # - HPL Directory Structure / HPL library ------------------------------
@@ -122,19 +122,29 @@ MPlib        =
 # used. The variable LAdir is only used for defining LAinc and LAlib.
 
 ifndef MKLROOT
-MKLROOT      = /opt/intel/mkl
+MKLROOT      = $(shell if [ -e /opt/intel/oneapi/mkl/latest/lib ]; then echo /opt/intel/oneapi/mkl/latest; else echo /opt/intel/mkl; fi)
 endif
 LAdir        = $(MKLROOT)
 ifndef  LAinc
 LAinc        = -I$(LAdir)/include
 endif
 ifndef  LAlib
+ifneq (,$(wildcard $(LAdir)/lib/libmkl_core.a))
+# Flags generated using https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl-link-line-advisor.html
+LAlib        = -L$(LAdir)/lib \
+               -Wl,--start-group \
+               $(LAdir)/lib/libmkl_intel_lp64.a \
+               $(LAdir)/lib/libmkl_intel_thread.a \
+               $(LAdir)/lib/libmkl_core.a \
+               -Wl,--end-group -liomp5 -lpthread -lm -ldl
+else ifneq (,$(wildcard $(LAdir)/lib/intel64/libmkl_core.a))
 LAlib        = -L$(LAdir)/lib/intel64 \
                -Wl,--start-group \
                $(LAdir)/lib/intel64/libmkl_intel_lp64.a \
                $(LAdir)/lib/intel64/libmkl_intel_thread.a \
                $(LAdir)/lib/intel64/libmkl_core.a \
-               -Wl,--end-group -lpthread -ldl
+               -Wl,--end-group -lpthread -lm -ldl
+endif
 endif
 
 #
