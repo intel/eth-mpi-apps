@@ -74,6 +74,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 struct ze_dev_ctxt {
 	ze_device_handle_t dev;
+	int dev_inx; /* Index in ze_devices[] */
 	uint32_t ordinal; /* CmdQGrp ordinal for the 1st copy_only engine */
 	uint32_t index;   /* Cmdqueue index within the CmdQGrp */
 	uint32_t num_queues; /* Number of queues in the CmdQGrp */
@@ -86,8 +87,8 @@ static ze_driver_handle_t ze_driver = NULL;
 static ze_device_handle_t devices[MAX_ZE_DEVICES];
 static struct ze_dev_ctxt ze_devices[MAX_ZE_DEVICES];
 static struct ze_dev_ctxt *cur_ze_dev = NULL;
-static ze_command_queue_handle_t ze_cq = NULL;
-static ze_command_list_handle_t ze_cl = NULL;
+static uint32_t ze_dev_cnt = 0;
+static int ze_use_multi_dev = 0;
 
 #define MPI_STRESS_ONEAPI_ZE_CALL(func, args...) do { \
   ze_result_t result; \
@@ -194,12 +195,16 @@ static void oneapi_ze_malloc(void **pptr, size_t size)
   MPI_STRESS_ONEAPI_ZE_CALL(zeMemAllocDevice, ze_context, &dev_desc, size, alignment, cur_ze_dev->dev, pptr);
 }
 
-static void oneapi_ze_memcpy(void *dstptr, const void *srcptr, size_t size) {
-  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListAppendMemoryCopy, ze_cl, dstptr, srcptr, size, NULL, 0, NULL);
-  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListClose, ze_cl);
-  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueExecuteCommandLists, ze_cq, 1, &ze_cl, NULL);
-  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueSynchronize, ze_cq, UINT32_MAX);
-  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListReset, ze_cl);
+static void oneapi_ze_memcpy(void *dstptr, const void *srcptr, size_t size,
+			     struct ze_dev_ctxt *ctxt)
+{
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListAppendMemoryCopy, ctxt->cl, dstptr,
+                            srcptr, size, NULL, 0, NULL);
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListClose, ctxt->cl);
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueExecuteCommandLists, ctxt->cq, 1,
+                            &ctxt->cl, NULL);
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueSynchronize, ctxt->cq, UINT32_MAX);
+  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListReset, ctxt->cl);
 }
 
 static void oneapi_ze_cmd_create(ze_device_handle_t dev, struct ze_dev_ctxt *ctxt)
@@ -387,6 +392,9 @@ typedef struct msg_state
   uint8_t *buf;
 #if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
   uint8_t *gpubuf;
+#ifdef MPI_STRESS_ONEAPI
+  struct ze_dev_ctxt *dev_ctxt;
+#endif
 #endif
 
   MPI_Request req;
@@ -429,6 +437,7 @@ typedef struct params
   int uni_grid;
   int use_random_length;
   int use_small_messages;
+  int use_multi_devices;
   uint32_t repeats;
   uint32_t runtime_mins;
   uint32_t min_msg_size;
@@ -862,10 +871,18 @@ static void alloc_msg_array (msg_array_t *array, uint32_t count,
       array->msgs[i].gpubuf = NULL;
 #endif
 #ifdef MPI_STRESS_ONEAPI
-    if (use_gpubuf)
+    if (use_gpubuf) {
       oneapi_ze_malloc((void **) &array->msgs[i].gpubuf, size);
-    else
+      array->msgs[i].dev_ctxt = cur_ze_dev;
+      if (ze_use_multi_dev) {
+	      int next;
+
+	      next = (cur_ze_dev->dev_inx + 1) % ze_dev_cnt;
+	      cur_ze_dev = &ze_devices[next];
+      }
+    } else {
       array->msgs[i].gpubuf = NULL;
+    }
 #endif
     array->msgs[i].req = MPI_REQUEST_NULL;
     array->msgs[i].poison_seed = 0;
@@ -911,7 +928,7 @@ static void preinit_msg (local_state_t *local, msg_state_t *msg,
 #endif
 #ifdef MPI_STRESS_ONEAPI
   if (gpubuf)
-    oneapi_ze_memcpy(gpubuf, buf, data_len + sizeof(msg_hdr_t));
+    oneapi_ze_memcpy(gpubuf, buf, data_len + sizeof(msg_hdr_t), msg->dev_ctxt);
 #endif
 }
 
@@ -973,7 +990,8 @@ static void preinit_msg_array (local_state_t *local, msg_array_t *array,
 #ifdef MPI_STRESS_ONEAPI
   for (i = 0; i < array->count; i++) {
     if (array->msgs[i].gpubuf) {
-      oneapi_ze_memcpy(array->msgs[i].gpubuf, array->msgs[i].buf, array->size);
+      oneapi_ze_memcpy(array->msgs[i].gpubuf, array->msgs[i].buf, array->size,
+                       array->msgs[i].dev_ctxt);
     }
   }
 #endif
@@ -1063,6 +1081,9 @@ static int send_one_msg (local_state_t *local, msg_array_t *send_array,
   uint8_t *gpubuf = send_array->msgs[index].gpubuf;
   msg_hdr_t *gpuhdr = (msg_hdr_t *) gpubuf;
   uint8_t *gpudata = (uint8_t *) (gpuhdr + 1);
+#ifdef MPI_STRESS_ONEAPI
+  struct ze_dev_ctxt *ctxt = send_array->msgs[index].dev_ctxt;
+#endif
 #endif
   uint32_t dst;
   uint32_t tag;
@@ -1088,7 +1109,7 @@ static int send_one_msg (local_state_t *local, msg_array_t *send_array,
 #endif
 #ifdef MPI_STRESS_ONEAPI
     if (local->params.use_gpu_send)
-      oneapi_ze_memcpy(gpubuf, buf, sizeof(msg_hdr_t));
+      oneapi_ze_memcpy(gpubuf, buf, sizeof(msg_hdr_t), ctxt);
 #endif
   } else {
     tag = 1;
@@ -1100,7 +1121,7 @@ static int send_one_msg (local_state_t *local, msg_array_t *send_array,
 #endif
 #ifdef MPI_STRESS_ONEAPI
     if (local->params.use_gpu_send)
-      oneapi_ze_memcpy(gpubuf, buf, size);
+      oneapi_ze_memcpy(gpubuf, buf, size, ctxt);
 #endif
   }
 
@@ -1145,6 +1166,9 @@ static int poll_for_msgs (local_state_t *local, msg_array_t *recv_array,
     uint8_t *gpubuf = msg->gpubuf;
     msg_hdr_t *gpuhdr = (msg_hdr_t *) gpubuf;
     uint8_t *gpudata = (uint8_t *) (gpuhdr + 1);
+#ifdef MPI_STRESS_ONEAPI
+    struct ze_dev_ctxt *ctxt = msg->dev_ctxt;
+#endif
 #endif
     MPI_Request *recv_req = &msg->req;
     MPI_Status recv_status;
@@ -1186,7 +1210,7 @@ static int poll_for_msgs (local_state_t *local, msg_array_t *recv_array,
 #endif
 #ifdef MPI_STRESS_ONEAPI
 	  if (local->params.use_gpu_recv)
-      oneapi_ze_memcpy(buf, gpubuf, irecv_size);
+      oneapi_ze_memcpy(buf, gpubuf, irecv_size, ctxt);
 #endif
           errors += validate_msg(stdout, local, msg, hdr, src, tag,
 				 count, data);
@@ -1991,6 +2015,9 @@ static void get_help (int argc, char **argv)
   printf("  -m INT : set max msg size  (default %d)\n", DEFAULT_MAX_MSG_SIZE);
   printf("  -M INT : set max msg count (default %d)\n", DEFAULT_MAX_MSGS);
   printf("  -n INT : number of times to repeat (default %d)\n", DEFAULT_REPS);
+#ifdef MPI_STRESS_ONEAPI
+  printf("  -N : Allocate buffers from multiple devices\n");
+#endif
   printf("  -O : show options and parameters used for the run.\n");
   printf("  -p : show progress\n");
   printf("  -P : poison receive buffers at init and after each receive\n");
@@ -2010,6 +2037,13 @@ static void get_help (int argc, char **argv)
   printf("  -z : enable typical options for data integrity (-drx)\n");
   printf("     : (for stronger integrity checking try using -drc instead)\n");
   printf("  -Z : zero receive buffers at init and after each receive\n");
+  printf("  SEND_DEVICE : Source buffer location for send.\n");
+  printf("       H will use CPU. D will use GPU.  When built for GPU,\n");
+  printf("       default is D.  When built for CPU, only H is allowed.\n");
+  printf("  RECV_DEVICE : Destination buffer location for receive.\n");
+  printf("       H will use CPU. D will use GPU.  When built for GPU,\n");
+  printf("       default is D.  When built for CPU, only H is allowed.\n");
+  printf("\n");
   printf("This an an MPI stress test program designed to load up an MPI\n"
          "interconnect with point-to-point messages while optionally\n"
          "checking for data integrity. By default, it runs with all-to-all\n"
@@ -2032,7 +2066,7 @@ static void get_params (int argc, char **argv,
   int option;
   int result = EXIT_SUCCESS;
   int run = 1;
-  const char *optlist = "a:Ab:cdD:eE:g:G:hiI:l:L:m:M:n:OpPqrRsSt:uvw:W:xyzZ";
+  const char *optlist = "a:Ab:cdD:eE:g:G:hiI:l:L:m:M:n:NOpPqrRsSt:uvw:W:xyzZ";
 
   /* set default parameters */
   params->verbose = 0;					/* -v */
@@ -2070,6 +2104,7 @@ static void get_params (int argc, char **argv,
   params->wait_on_start = 0;				/* -W %d */
   params->wait_on_exit = 0;				/* -W %d */
   params->use_small_messages = 0;			/* -y */
+  params->use_multi_devices = 0;		        /* -N */
 #if defined(MPI_STRESS_CUDA) || defined(MPI_STRESS_ONEAPI)
   params->use_gpu_send = 1;				/* D D */
   params->use_gpu_recv = 1;
@@ -2162,6 +2197,12 @@ static void get_params (int argc, char **argv,
         params->repeats = mystrtoul(optarg, NULL, 0);
         break;
       }
+#ifdef MPI_STRESS_ONEAPI
+      case 'N' : {
+        params->use_multi_devices = 1;
+        break;
+      }
+#endif
       case 'O' : {
         params->show_options = 1;
         break;
@@ -2363,6 +2404,7 @@ static void get_params (int argc, char **argv,
     printf("Option align = %u\n", (unsigned) params->align);
     printf("Option mpi_send_fn_name = %s\n", params->mpi_send_fn_name);
     printf("Option max_errors = %d\n", params->max_errors);
+    printf("Option use_multi_devices = %d\n", params->use_multi_devices);
   }
   if (!run) {
 done:
@@ -2379,21 +2421,26 @@ int main (int argc, char **argv)
   uint32_t r;
   int running;
   double start, end, now;
+  int rank = 0;
+  char * rank_str;
 
   DEFAULT_MIN_MSG_SIZE = ceilpow2(sizeof(msg_hdr_t));
-
-#ifdef MPI_STRESS_CUDA
-  int rank, num_devices, dev_id;
-  char * rank_str;
-  struct cudaDeviceProp dev_prop;
-  CUresult curesult = CUDA_SUCCESS;
-  CUdevice cuDevice;
-  CUcontext cuContext;
 
   if ((rank_str = getenv("OMPI_COMM_WORLD_LOCAL_RANK")) != NULL)
     rank = atoi(rank_str);
   else if ((rank_str = getenv("MV2_COMM_WORLD_LOCAL_RANK")) != NULL)
     rank = atoi(rank_str);
+  else if ((rank_str = getenv("MPI_LOCALRANKID")) != NULL)
+    rank = atoi(rank_str);
+  else if ((rank_str = getenv("PMI_RANK")) != NULL)
+    rank = atoi(rank_str);
+
+#ifdef MPI_STRESS_CUDA
+  int num_devices, dev_id;
+  struct cudaDeviceProp dev_prop;
+  CUresult curesult = CUDA_SUCCESS;
+  CUdevice cuDevice;
+  CUcontext cuContext;
 
   /* CUDA INIALIZATION */
   CUDA_CALL(cudaGetDeviceCount, &num_devices);
@@ -2450,38 +2497,27 @@ int main (int argc, char **argv)
 
   int i;
   int devCnt;
-  int rank = 0;
-  char *rank_str;
-  uint32_t ze_driver_count = 1, ze_device_count = 1;
-
-  if ((rank_str = getenv("OMPI_COMM_WORLD_LOCAL_RANK")) != NULL)
-    rank = atoi(rank_str);
-  else if ((rank_str = getenv("MV2_COMM_WORLD_LOCAL_RANK")) != NULL)
-    rank = atoi(rank_str);
-  else if ((rank_str = getenv("MPI_LOCALRANKID")) != NULL)
-    rank = atoi(rank_str);
-  else if ((rank_str = getenv("PMI_RANK")) != NULL)
-    rank = atoi(rank_str);
+  uint32_t ze_driver_count = 1, ze_device_count = 0;
 
   MPI_STRESS_ONEAPI_ZE_CALL(zeDriverGet, &ze_driver_count, &ze_driver);
 
   ze_context_desc_t ctxtDesc = { ZE_STRUCTURE_TYPE_CONTEXT_DESC, NULL, 0 };
   MPI_STRESS_ONEAPI_ZE_CALL(zeContextCreate, ze_driver, &ctxtDesc, &ze_context);
 
-  ze_device_count = 0;
   MPI_STRESS_ONEAPI_ZE_CALL(zeDeviceGet, ze_driver, &ze_device_count, NULL);
   if (ze_device_count > MAX_ZE_DEVICES)
     ze_device_count = MAX_ZE_DEVICES;
   MPI_STRESS_ONEAPI_ZE_CALL(zeDeviceGet, ze_driver, &ze_device_count, devices);
 
-  for (i = 0; i < ze_device_count; i++)
+  for (i = 0; i < ze_device_count; i++) {
     oneapi_ze_cmd_create(devices[i], &ze_devices[i]);
+    ze_devices[i].dev_inx = i;
+  }
 
   devCnt = ze_device_count;
   i = rank % devCnt;		/* Get device id based on rank and number of suitable devices */
   cur_ze_dev = &ze_devices[i];
-  ze_cq = cur_ze_dev->cq;
-  ze_cl = cur_ze_dev->cl;
+  ze_dev_cnt = ze_device_count;
 #endif
 
   MPI_Init(&argc, &argv);
@@ -2497,6 +2533,10 @@ int main (int argc, char **argv)
   printf("Rank %d: Using OneAPI Device %d (%d total)\n", comm_rank, i, devCnt);
 #endif
 
+#ifdef MPI_STRESS_ONEAPI
+  if (devCnt > 1 && params.use_multi_devices)
+      ze_use_multi_dev = 1;
+#endif
   if (params.wait_on_start) {
     if (comm_rank == 0) {
       printf("Wait for %d seconds at start\n", params.wait_on_start);
@@ -2569,8 +2609,10 @@ int main (int argc, char **argv)
   }
 #endif
 #ifdef MPI_STRESS_ONEAPI
-  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListDestroy, ze_cl);
-  MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueDestroy, ze_cq);
+  for (i = 0; i < ze_device_count; i++) {
+    MPI_STRESS_ONEAPI_ZE_CALL(zeCommandListDestroy, ze_devices[i].cl);
+    MPI_STRESS_ONEAPI_ZE_CALL(zeCommandQueueDestroy, ze_devices[i].cq);
+  }
   MPI_STRESS_ONEAPI_ZE_CALL(zeContextDestroy, ze_context);
 #endif
 
