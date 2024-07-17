@@ -1,6 +1,6 @@
 # Intel(R) MPI Benchmarks
-[![Common Public License Version 1.0](https://img.shields.io/badge/license-Common%20Public%20License%20Version%201.0-green.svg)](license/license.txt)
-![v2021.3](https://img.shields.io/badge/v.2021.3-Update-orange.svg)
+[![3-Clause BSD License](https://img.shields.io/badge/license-3%20Clause%20BSD%20License-green.svg)](license/license.txt)
+![v2021.7](https://img.shields.io/badge/v.2021.7-Update-orange.svg)
 --------------------------------------------------
 
 --------
@@ -14,7 +14,7 @@ Contents
 - Building Instructions for Linux* OS
 - Building Instructions for Windows* OS
 - Copyright and License Information
-- Legal Information
+- Notices & Disclaimers
 
 ------------
 Introduction
@@ -26,7 +26,7 @@ command line using one executable file. Use command-line parameters to specify
 various settings, such as time measurement, message lengths, and selection of 
 communicators. For details, see the Intel(R) MPI Benchmarks User's Guide 
 located at:
-https://software.intel.com/en-us/imb-user-guide.
+https://www.intel.com/content/www/us/en/docs/mpi-library/user-guide-benchmarks/2021-2/overview.html
 
 By default, Intel(R) MPI Benchmarks is installed at:
   - C:\Program Files (x86)\IntelSWTools\imb on Windows* OS 
@@ -63,6 +63,25 @@ files and folders appear on your system:
 ----------
 What's New
 ----------
+New in Intel(R) MPI Benchmarks 2021.7
+----------------------------------------
+- IMB-MPI1-GPU benchmark.
+  Dynamically loading from LD_LIBRARY_PATH
+  cuda or level zero library.
+
+New in Intel(R) MPI Benchmarks 2021.6
+----------------------------------------
+- Bug fixes.
+
+New in Intel(R) MPI Benchmarks 2021.5
+----------------------------------------
+- License update
+- Bug fixes.
+
+New in Intel(R) MPI Benchmarks 2021.4
+----------------------------------------
+- Bug fixes.
+
 New in Intel(R) MPI Benchmarks 2021.3
 ----------------------------------------
 - Change default value for mem_alloc_type to device
@@ -127,7 +146,7 @@ New in Intel(R) MPI Benchmarks 2019
   using the OpenMP* paradigm.
 - New benchmarks infrastructure for easier benchmarks extension is 
   implemented in C++ (See the guide: 
-  https://software.intel.com/en-us/articles/creating-custom-benchmarks-for-imb-2019).
+  https://www.intel.com/content/www/us/en/developer/articles/technical/creating-custom-benchmarks-for-imb-2019.html?wapkw=creating-custom-benchmarks-for-imb-2019).
   The IMB-MPI1, IMB-RMA, IMB-NBC, IMB-EXT, IMB-IO, and IMB-MT implementation 
   is now based on the new C++ infrastructure. The legacy infrastructure is 
   preserved in the src_c subdirectory.
@@ -154,7 +173,7 @@ New in Intel(R) MPI Benchmarks 2018 Update 1
 New in Intel(R) MPI Benchmarks 2018
 --------------------------------------------
 - Product documentation is now available online only at:
-  https://software.intel.com/en-us/imb-user-guide
+  https://www.intel.com/content/www/us/en/docs/mpi-library/user-guide-benchmarks/2021-2/overview.html 
 - Removed support of the Intel(R) Xeon Phi(TM) coprocessors (formerly code named
   Knights Corner).
 
@@ -243,7 +262,7 @@ Building Instructions for Linux* OS
 
    where <component> is one of the make targets above.
    For details, refer to the Intel(R) MPI Benchmarks User's Guide at:
-   https://software.intel.com/en-us/imb-user-guide
+   https://www.intel.com/content/www/us/en/docs/mpi-library/user-guide-benchmarks/2021-2/overview.html
 
 -----------------------------------------
 Building Instructions for Windows* OS
@@ -286,7 +305,7 @@ Building "x64" Executable Files
 3) Use F7 or Build > Build Solution to create an executable.
 
    For details, refer to the Intel(R) MPI Benchmarks User's Guide at:
-   https://software.intel.com/en-us/imb-user-guide
+   https://www.intel.com/content/www/us/en/docs/mpi-library/user-guide-benchmarks/2021-2/overview.html
 
 ----------------------
 Copyright and Licenses
@@ -295,28 +314,17 @@ Copyright and Licenses
 See the license files in the imb/license directory.
 
 --------------------------------
-Legal Information
+Notices & Disclaimers
 --------------------------------
-No license (express or implied, by estoppel or otherwise) to any intellectual
-property rights is granted by this document.
+Intel technologies may require enabled hardware, software or service activation.
 
-Intel disclaims all express and implied warranties, including without limitation,
-the implied warranties of merchantability, fitness for a particular purpose, and
-non-infringement, as well as any warranty arising from course of performance,
-course of dealing, or usage in trade.
+No product or component can be absolutely secure. 
 
-This document contains information on products, services and/or processes in
-development. All information provided here is subject to change without notice.
-Contact your Intel representative to obtain the latest forecast, schedule,
-specifications and roadmaps.
+Your costs and results may vary. 
 
-The products and services described may contain defects or errors known as
-errata which may cause deviations from published specifications. Current
-characterized errata are available on request.
+© Intel Corporation.  Intel, the Intel logo, and other Intel marks are trademarks of Intel Corporation or its subsidiaries.  Other names and brands may be claimed as the property of others.
 
-Intel, Intel Core, Xeon, Xeon Phi and the Intel logo are trademarks of Intel
-Corporation in the U.S. and/or other countries.
-
-* Other names and brands may be claimed as the property of others.
-
-(C) Intel Corporation.
+--------------------------------
+Security Policy
+--------------------------------
+See [SECURITY](SECURITY.md) for more information.
