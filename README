@@ -1,5 +1,10 @@
 Eth MPI apps
 ------------
+* LICENSE file refers to Intel developed code. 3rd-Party code will have a
+  LICENSE, COPYING, or COPYRIGHT file in the top-level of their subdirectory.
+  * HPL v2.3: MpiApps/apps/hpl-2.3/COPYRIGHT and MpiApps/apps/hpl-2.3/COPYING
+  * OSU v5.9: MpiApps/apps/osu-micro-benchmarks-5.9/COPYRIGHT
+  * IMB 2021.7: MpiApps/apps/imb/license/*
 
 * To build the RPM and SRPM:
 
